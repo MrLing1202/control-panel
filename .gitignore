@@ -46,6 +46,9 @@ __pycache__/
 .temp/
 *.tmp
 
+# launchd / runtime logs
+tools/*.launchd.*
+
 # Keep config files tracked (do NOT ignore)
 # backend/config/mosquitto.conf
 

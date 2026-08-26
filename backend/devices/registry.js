@@ -113,6 +113,178 @@ const registeredTypes = [
     ],
     close: (ctx) => ctx.writeProps({ shock: 0, voltage: 0, power: 0 }),
   }),
+
+  // ---- 蓝牙体感设备（品牌设备）----
+  // 经由 App “娱乐模式”本地 WebSocket 控制（协议见 backend/brands/protocols/dglab.js）。
+  // 娱乐模式为单活动波形模型；shock/strength 两个能力均映射为 set_pattern，
+  // 设备类型层只负责发出品牌命令，真正翻译为 App 帧由品牌连接适配器完成。
+  new BaseDeviceType({
+    type: 'DGLAB',
+    name: '蓝牙体感设备',
+    capabilities: {
+      shock: {
+        actions: {
+          start: (ctx, params) => ctx.sendMessage({
+            brand: 'dglab', cmd: 'setPattern',
+            pattern: '经典',
+            intensity: Math.max(0, Math.min(100, Math.round(Number(params.voltage) || 0))),
+            ticks: -1,
+          }),
+          stop: (ctx) => ctx.sendMessage({ brand: 'dglab', cmd: 'stopPattern' }),
+        },
+      },
+      strength: {
+        actions: {
+          set: (ctx, params) => ctx.sendMessage({
+            brand: 'dglab', cmd: 'setPattern',
+            pattern: '经典',
+            intensity: Math.max(0, Math.min(100, Math.round(Number(params.value) || 0))),
+            ticks: -1,
+          }),
+          stop: (ctx) => ctx.sendMessage({ brand: 'dglab', cmd: 'stopPattern' }),
+        },
+      },
+    },
+    operations: [
+      { key: 'start', name: '启动', capability: 'shock', action: 'start', input: { voltage: 60 } },
+      { key: 'stop', name: '停止', capability: 'shock', action: 'stop', input: {} },
+    ],
+    close: (ctx) => ctx.sendMessage({ brand: 'dglab', cmd: 'stopPattern' }),
+  }),
+
+  // ---- 遥控蓝牙设备·电击型（0x35 族电刺激帧）----
+  // 通道 A/B 经 setStrength 下发（无状态单条指令，双通道需分别下发）；全局停止为 stopAll。
+  // BLE 直连帧结构见 backend/brands/protocols/ycy.js（35 11 02 | qda/pla/tla | qdb/plb/tlb）。
+  new BaseDeviceType({
+    type: 'YCY_EMS',
+    name: '电击型设备',
+    capabilities: {
+      shock: {
+        actions: {
+          start: (ctx, params) => ctx.sendMessage({
+            brand: 'ycy', cmd: 'setStrength', channel: 'A',
+            value: Math.max(0, Math.min(100, Math.round(Number(params.voltage) || 0))),
+          }),
+          stop: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopAll' }),
+        },
+      },
+      strength: {
+        actions: {
+          set: (ctx, params) => ctx.sendMessage({
+            brand: 'ycy', cmd: 'setStrength', channel: 'B',
+            value: Math.max(0, Math.min(100, Math.round(Number(params.value) || 0))),
+          }),
+          stop: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopAll' }),
+        },
+      },
+    },
+    operations: [
+      { key: 'start', name: '启动', capability: 'shock', action: 'start', input: { voltage: 40 } },
+      { key: 'stop', name: '停止', capability: 'shock', action: 'stop', input: {} },
+    ],
+    close: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopAll' }),
+  }),
+
+  // ---- 遥控蓝牙设备·电机型（0x35 族电机帧 35 12）----
+  // 电机速度 0–20（此处以 0–100 输入映射到 0–20）；玩具模式映射到电机速度（无独立 mode 帧）。
+  new BaseDeviceType({
+    type: 'YCY_TOY',
+    name: '电机型设备',
+    capabilities: {
+      strength: {
+        actions: {
+          set: (ctx, params) => {
+            const v = Math.max(0, Math.min(100, Math.round(Number(params.value) || 0)));
+            const speed = Math.round((v / 100) * 20);
+            return ctx.sendMessage({ brand: 'ycy', cmd: 'setSpeed', motor: 'A', speed });
+          },
+          stop: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopToy' }),
+        },
+      },
+    },
+    operations: [
+      { key: 'start', name: '启动', capability: 'strength', action: 'set', input: { value: 80 } },
+      { key: 'stop', name: '停止', capability: 'strength', action: 'stop', input: {} },
+    ],
+    close: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopToy' }),
+  }),
+
+  // ---- 遥控蓝牙设备·杯（pump 协议，AES-128 加密 BLE 直发）----
+  // 杯为 BLE 原生泵设备：泵帧以 BF 0F A0 起头、整体经 AES-128（密钥见 PUMP_CIPHER_KEY，
+  // 模式 AES-128-ECB + NoPadding）加密为 16 字节密文下发（协议见 backend/brands/protocols/ycy.js
+  // 的 buildPumpEncrypted）。连接需为 BLE 直连模式（mode=ble）；桥接模式仅支持 triggerInstruction。
+  // 注：泵帧命令字节为 APK 逆向所得，建议用真机抓包对拍；若设备无响应可改 protocol:'v3' 试明文帧。
+  new BaseDeviceType({
+    type: 'YCY_CUP',
+    name: '杯型设备',
+    capabilities: {},
+    operations: [
+      {
+        key: 'pumpStart', name: '启动泵(充气/吸吮)',
+        invoke: (ctx, params) => ctx.sendMessage({
+          brand: 'ycy', cmd: 'pump',
+          protocol: params?.protocol || 'v1',
+          scene: params?.scene || 'add',
+          rate: params?.rate, ss: params?.ss,
+        }),
+      },
+      {
+        key: 'pumpStop', name: '停止泵',
+        invoke: (ctx, params) => ctx.sendMessage({
+          brand: 'ycy', cmd: 'pump', protocol: params?.protocol || 'v1', scene: 'stop',
+        }),
+      },
+      {
+        key: 'trigger', name: '触发指令(桥接兜底)',
+        invoke: (ctx, params) => {
+          if (!params || !params.commandId) throw new Error('缺少指令 ID (commandId)');
+          return ctx.sendMessage({ brand: 'ycy', cmd: 'triggerInstruction', commandId: params.commandId });
+        },
+      },
+      {
+        key: 'stop', name: '全部停止',
+        invoke: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopAll' }),
+      },
+    ],
+    close: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopAll' }),
+  }),
+
+  // ---- 遥控蓝牙设备·灌肠机（pump 协议，AES-128 加密 BLE 直发）----
+  // 与杯型同属泵设备，默认动作改为注水（guan）；其余同 YCY_CUP。
+  new BaseDeviceType({
+    type: 'YCY_ENEMA',
+    name: '灌肠型设备',
+    capabilities: {},
+    operations: [
+      {
+        key: 'pumpStart', name: '启动泵(注水)',
+        invoke: (ctx, params) => ctx.sendMessage({
+          brand: 'ycy', cmd: 'pump',
+          protocol: params?.protocol || 'v1',
+          scene: params?.scene || 'guan',
+          rate: params?.rate, ss: params?.ss,
+        }),
+      },
+      {
+        key: 'pumpStop', name: '停止泵',
+        invoke: (ctx, params) => ctx.sendMessage({
+          brand: 'ycy', cmd: 'pump', protocol: params?.protocol || 'v1', scene: 'stop',
+        }),
+      },
+      {
+        key: 'trigger', name: '触发指令(桥接兜底)',
+        invoke: (ctx, params) => {
+          if (!params || !params.commandId) throw new Error('缺少指令 ID (commandId)');
+          return ctx.sendMessage({ brand: 'ycy', cmd: 'triggerInstruction', commandId: params.commandId });
+        },
+      },
+      {
+        key: 'stop', name: '全部停止',
+        invoke: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopAll' }),
+      },
+    ],
+    close: (ctx) => ctx.sendMessage({ brand: 'ycy', cmd: 'stopAll' }),
+  }),
 ];
 
 const registry = new Map(registeredTypes.map((dt) => [dt.type, dt]));
